@@ -3,7 +3,7 @@ Configuration for the Bio-ChemTransformer model.
 """
 
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import List, Optional, Union
 
 
@@ -63,10 +63,10 @@ class TrainingConfig:
     max_grad_norm: float = 1.0
     
     # Training settings
-    num_train_epochs: int = 10
+    num_train_epochs: int = 10  # Restored original value
     max_steps: int = -1  # Overrides num_train_epochs if > 0
-    per_device_train_batch_size: int = 32
-    per_device_eval_batch_size: int = 32
+    per_device_train_batch_size: int = 32  # Restored original value
+    per_device_eval_batch_size: int = 32  # Restored original value
     gradient_accumulation_steps: int = 1
     
     # Learning rate schedule
@@ -76,13 +76,13 @@ class TrainingConfig:
     # Evaluation and logging
     evaluation_strategy: str = "epoch"
     logging_dir: str = "./logs"
-    logging_steps: int = 100
-    save_steps: int = 1000
-    eval_steps: int = 1000
+    logging_steps: int = 100  # Restored original value
+    save_steps: int = 1000  # Restored original value
+    eval_steps: int = 1000  # Restored original value
     save_total_limit: int = 3
     
     # Early stopping
-    early_stopping_patience: int = 3
+    early_stopping_patience: int = 3  # Restored original value
     early_stopping_threshold: float = 0.01
     
     # Mixed precision
@@ -111,9 +111,9 @@ class DataConfig:
 
 @dataclass
 class Config:
-    model: ModelConfig = ModelConfig()
-    training: TrainingConfig = TrainingConfig()
-    data: DataConfig = DataConfig()
+    model: ModelConfig = field(default_factory=ModelConfig)
+    training: TrainingConfig = field(default_factory=TrainingConfig)
+    data: DataConfig = field(default_factory=DataConfig)
     
     # General settings
     seed: int = 42

@@ -162,11 +162,15 @@ class BioChemTransformer(nn.Module):
         """
         # If decoder_input_ids not provided, create them by shifting the target by one position
         if decoder_input_ids is None:
+            # Create decoder input IDs with the same sequence length as adr_input_ids
             decoder_input_ids = torch.zeros(
-                (adr_input_ids.shape[0], 1),
+                (adr_input_ids.shape[0], adr_input_ids.shape[1]),
                 dtype=torch.long,
                 device=adr_input_ids.device
             ).fill_(self.pad_token_id)
+            
+            # Set the first token to the start token
+            decoder_input_ids[:, 0] = self.pad_token_id
         
         # Get combined embeddings from Bio_ClinicalBERT and ChemBERT
         if encoder_outputs is None:
@@ -201,8 +205,8 @@ class BioChemTransformer(nn.Module):
             output_hidden_states=output_hidden_states
         )
         
-        # Get decoder outputs
-        logits = decoder_outputs[0]
+        # Get logits from decoder outputs dictionary
+        logits = decoder_outputs["logits"]
         
         # Return outputs
         if return_dict:
@@ -210,12 +214,16 @@ class BioChemTransformer(nn.Module):
                 "logits": logits,
                 "encoder_hidden_states": encoder_hidden_states,
                 "encoder_attentions": encoder_outputs[2] if output_attentions else None,
-                "decoder_hidden_states": decoder_outputs[1] if output_hidden_states else None,
-                "decoder_self_attentions": decoder_outputs[2] if output_attentions else None,
-                "decoder_cross_attentions": decoder_outputs[3] if output_attentions else None
+                "decoder_hidden_states": decoder_outputs.get("hidden_states") if output_hidden_states else None,
+                "decoder_self_attentions": decoder_outputs.get("attentions", {}).get("self_attentions") if output_attentions else None,
+                "decoder_cross_attentions": decoder_outputs.get("attentions", {}).get("cross_attentions") if output_attentions else None
             }
         else:
-            return (logits,) + encoder_outputs[1:] + decoder_outputs[1:]
+            return (logits,) + encoder_outputs[1:] + (
+                decoder_outputs.get("hidden_states") if output_hidden_states else None,
+                decoder_outputs.get("attentions", {}).get("self_attentions") if output_attentions else None,
+                decoder_outputs.get("attentions", {}).get("cross_attentions") if output_attentions else None
+            )
     
     def generate(
         self,
@@ -296,7 +304,7 @@ class BioChemTransformer(nn.Module):
             )
             
             # Get next token logits
-            next_token_logits = decoder_outputs[0][:, -1, :]
+            next_token_logits = decoder_outputs["logits"][:, -1, :]
             
             # Apply temperature
             if temperature != 1.0:

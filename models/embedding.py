@@ -4,7 +4,7 @@ Embedding layer for the Bio-ChemTransformer.
 
 import torch
 import torch.nn as nn
-from transformers import AutoModel
+from transformers import AutoModel, AutoTokenizer
 from typing import Dict, Tuple, Optional
 
 
@@ -20,7 +20,9 @@ class BioChemEmbedding(nn.Module):
         bio_clinical_bert_dim: int = 768,
         chembert_dim: int = 768,
         projection_dim: int = 768,
-        embedding_combination: str = "concat"
+        embedding_combination: str = "concat",
+        max_adr_length: int = 256,
+        max_smiles_length: int = 256
     ):
         """
         Initialize the embedding layer.
@@ -32,6 +34,8 @@ class BioChemEmbedding(nn.Module):
             chembert_dim: Dimension of ChemBERT embeddings
             projection_dim: Dimension of the final embeddings after projection
             embedding_combination: Method to combine embeddings ("concat" or "sum")
+            max_adr_length: Maximum length for ADR text tokens
+            max_smiles_length: Maximum length for SMILES tokens
         """
         super().__init__()
         
@@ -39,17 +43,16 @@ class BioChemEmbedding(nn.Module):
         self.chembert_dim = chembert_dim
         self.projection_dim = projection_dim
         self.embedding_combination = embedding_combination
+        self.max_adr_length = max_adr_length
+        self.max_smiles_length = max_smiles_length
         
         # Load pre-trained models
         self.bio_clinical_bert = AutoModel.from_pretrained(bio_clinical_bert_model)
         self.chembert = AutoModel.from_pretrained(chembert_model)
         
-        # Freeze pre-trained models (optional, can be unfrozen for fine-tuning)
-        # Uncomment to freeze:
-        # for param in self.bio_clinical_bert.parameters():
-        #     param.requires_grad = False
-        # for param in self.chembert.parameters():
-        #     param.requires_grad = False
+        # Load tokenizers
+        self.bio_clinical_tokenizer = AutoTokenizer.from_pretrained(bio_clinical_bert_model)
+        self.chembert_tokenizer = AutoTokenizer.from_pretrained(chembert_model)
         
         # Projection layers for dimensional alignment if needed
         self.bio_projection = None
@@ -63,10 +66,47 @@ class BioChemEmbedding(nn.Module):
         
         # If using concatenation, we need a final projection to the desired dimension
         if embedding_combination == "concat":
-            concat_dim = projection_dim * 2
-            self.final_projection = nn.Linear(concat_dim, projection_dim)
+            # The final projection should project from projection_dim to projection_dim
+            # since we're projecting each embedding separately first
+            self.final_projection = nn.Linear(projection_dim, projection_dim)
         else:
             self.final_projection = None
+    
+    def tokenize_adr_text(self, adr_text_list):
+        """
+        Tokenize a list of ADR text strings using Bio_ClinicalBERT tokenizer.
+        
+        Args:
+            adr_text_list: List of ADR text strings
+            
+        Returns:
+            Dictionary with input_ids and attention_mask
+        """
+        return self.bio_clinical_tokenizer(
+            adr_text_list,
+            padding='max_length',
+            truncation=True,
+            max_length=self.max_adr_length,
+            return_tensors='pt'
+        )
+    
+    def tokenize_smiles(self, smiles_list):
+        """
+        Tokenize a list of SMILES strings using ChemBERT tokenizer.
+        
+        Args:
+            smiles_list: List of SMILES strings
+            
+        Returns:
+            Dictionary with input_ids and attention_mask
+        """
+        return self.chembert_tokenizer(
+            smiles_list,
+            padding='max_length',
+            truncation=True,
+            max_length=self.max_smiles_length,
+            return_tensors='pt'
+        )
     
     def forward(
         self,
@@ -127,7 +167,12 @@ class BioChemEmbedding(nn.Module):
             
             # Apply final projection
             if self.final_projection is not None:
+                # Reshape the embeddings to (batch_size * seq_len, projection_dim)
+                batch_size, seq_len, hidden_dim = combined_embeddings.shape
+                combined_embeddings = combined_embeddings.reshape(-1, hidden_dim)
                 combined_embeddings = self.final_projection(combined_embeddings)
+                # Reshape back to (batch_size, seq_len, projection_dim)
+                combined_embeddings = combined_embeddings.reshape(batch_size, seq_len, -1)
                 
         elif self.embedding_combination == "sum":
             # Sum the embeddings (requires same sequence length)

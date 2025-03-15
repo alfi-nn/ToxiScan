@@ -6,7 +6,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import math
-from typing import Optional, Tuple
+from typing import Optional, Tuple, Dict
 
 
 class TransformerDecoderLayer(nn.Module):
@@ -36,18 +36,26 @@ class TransformerDecoderLayer(nn.Module):
         """
         super().__init__()
         
+        # Store dimensions
+        self.embed_dim = embed_dim
+        self.num_heads = num_heads
+        self.head_dim = embed_dim // num_heads
+        assert self.head_dim * num_heads == embed_dim, "embed_dim must be divisible by num_heads"
+        
         # Self-attention layer
         self.self_attn = nn.MultiheadAttention(
             embed_dim=embed_dim,
             num_heads=num_heads,
-            dropout=dropout
+            dropout=dropout,
+            batch_first=False  # [seq_len, batch, embed_dim]
         )
         
         # Cross-attention layer
         self.cross_attn = nn.MultiheadAttention(
             embed_dim=embed_dim,
             num_heads=num_heads,
-            dropout=dropout
+            dropout=dropout,
+            batch_first=False  # [seq_len, batch, embed_dim]
         )
         
         # Layer normalization
@@ -80,28 +88,23 @@ class TransformerDecoderLayer(nn.Module):
         
         Args:
             hidden_states: Input tensor [seq_len, batch_size, embed_dim]
-            encoder_hidden_states: Hidden states from the encoder [enc_seq_len, batch_size, embed_dim]
-            encoder_attention_mask: Attention mask for encoder states
-            self_attention_mask: Self-attention mask (usually causal mask for autoregressive decoding)
+            encoder_hidden_states: Hidden states from encoder [src_len, batch_size, embed_dim]
+            encoder_attention_mask: Attention mask for encoder states [batch_size, src_len]
+            self_attention_mask: Self-attention mask [tgt_len, tgt_len]
             self_head_mask: Mask for self-attention heads
             cross_head_mask: Mask for cross-attention heads
             output_attentions: Whether to return attention weights
-            
-        Returns:
-            Tuple of (output, self_attn_weights, cross_attn_weights)
         """
         # Self-attention block
         residual = hidden_states
         hidden_states = self.layer_norm1(hidden_states)
         
-        # nn.MultiheadAttention expects inputs in shape [seq_len, batch_size, embed_dim]
-        # Adjust hidden_states shape if different
-        if hidden_states.dim() == 3 and hidden_states.shape[0] != hidden_states.shape[1]:
-            # [batch_size, seq_len, embed_dim] -> [seq_len, batch_size, embed_dim]
-            if hidden_states.shape[0] > hidden_states.shape[1]:
-                hidden_states = hidden_states.transpose(0, 1)
+        # Ensure hidden states are in [seq_len, batch_size, embed_dim]
+        if hidden_states.size(1) == self.embed_dim:
+            hidden_states = hidden_states.transpose(0, 1)
+            print(f"Transposed hidden states to: {hidden_states.shape}")
         
-        # Compute self-attention
+        # Self-attention
         self_attn_output, self_attn_weights = self.self_attn(
             query=hidden_states,
             key=hidden_states,
@@ -118,13 +121,23 @@ class TransformerDecoderLayer(nn.Module):
         residual = hidden_states
         hidden_states = self.layer_norm2(hidden_states)
         
-        # Adjust encoder_hidden_states shape if different
-        if encoder_hidden_states.dim() == 3 and encoder_hidden_states.shape[0] != encoder_hidden_states.shape[1]:
-            # [batch_size, enc_seq_len, embed_dim] -> [enc_seq_len, batch_size, embed_dim]
-            if encoder_hidden_states.shape[0] > encoder_hidden_states.shape[1]:
-                encoder_hidden_states = encoder_hidden_states.transpose(0, 1)
+        # Ensure encoder hidden states are in [src_len, batch_size, embed_dim]
+        if encoder_hidden_states.size(1) == self.embed_dim:
+            encoder_hidden_states = encoder_hidden_states.transpose(0, 1)
+            print(f"Transposed encoder hidden states to: {encoder_hidden_states.shape}")
         
-        # Compute cross-attention
+        # Debug print shapes
+        print(f"Cross attention shapes:")
+        print(f"Query shape: {hidden_states.shape}")
+        print(f"Key/Value shape: {encoder_hidden_states.shape}")
+        
+        # Handle encoder attention mask
+        if encoder_attention_mask is not None:
+            # Ensure mask is float
+            if encoder_attention_mask.dtype != torch.float32:
+                encoder_attention_mask = encoder_attention_mask.float()
+        
+        # Cross-attention
         cross_attn_output, cross_attn_weights = self.cross_attn(
             query=hidden_states,
             key=encoder_hidden_states,
@@ -147,11 +160,6 @@ class TransformerDecoderLayer(nn.Module):
         
         hidden_states = residual + self.dropout3(hidden_states)
         
-        if hidden_states.shape[0] != hidden_states.shape[1] and hidden_states.dim() == 3:
-            # Convert back to [batch_size, seq_len, embed_dim] if needed
-            hidden_states = hidden_states.transpose(0, 1)
-        
-        # Return output and attention weights if requested
         if output_attentions:
             return hidden_states, self_attn_weights, cross_attn_weights
         return hidden_states, None, None
@@ -254,21 +262,24 @@ class TransformerDecoder(nn.Module):
         head_mask: Optional[torch.Tensor] = None,
         output_attentions: bool = False,
         output_hidden_states: bool = False
-    ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor]]:
+    ) -> Dict[str, torch.Tensor]:
         """
         Forward pass of the decoder.
         
         Args:
-            input_ids: Token IDs for the decoder input [batch_size, seq_len]
-            encoder_hidden_states: Hidden states from the encoder [batch_size, enc_seq_len, embed_dim]
-            encoder_attention_mask: Attention mask for encoder states [batch_size, enc_seq_len]
+            input_ids: Token IDs [batch_size, seq_len]
+            encoder_hidden_states: Hidden states from encoder [batch_size, src_len, embed_dim]
+            encoder_attention_mask: Attention mask for encoder states [batch_size, src_len]
             attention_mask: Attention mask for decoder [batch_size, seq_len]
             head_mask: Mask for attention heads
             output_attentions: Whether to return attention weights
             output_hidden_states: Whether to return hidden states
             
         Returns:
-            Tuple of (logits, all_hidden_states, all_attentions)
+            Dictionary containing:
+                - logits: Output logits [batch_size * seq_len, vocab_size]
+                - hidden_states: All hidden states (optional)
+                - attentions: All attention weights (optional)
         """
         all_hidden_states = () if output_hidden_states else None
         all_self_attns = () if output_attentions else None
@@ -278,17 +289,27 @@ class TransformerDecoder(nn.Module):
         input_shape = input_ids.shape
         batch_size, seq_length = input_shape
         
+        print(f"Input shape: {input_shape}")
+        
         # Create position IDs
         positions = self.position_ids[:, :seq_length]
         
         # Create token embeddings
-        inputs_embeds = self.embed_tokens(input_ids)
+        inputs_embeds = self.embed_tokens(input_ids)  # [batch_size, seq_len, embed_dim]
         
         # Create position embeddings
-        position_embeds = self.embed_positions(positions)
+        position_embeds = self.embed_positions(positions)  # [1, seq_len, embed_dim]
         
         # Combine token and position embeddings
-        hidden_states = inputs_embeds + position_embeds
+        hidden_states = inputs_embeds + position_embeds  # [batch_size, seq_len, embed_dim]
+        
+        # Ensure hidden states are in [seq_len, batch_size, embed_dim]
+        hidden_states = hidden_states.transpose(0, 1)  # [seq_len, batch_size, embed_dim]
+        print(f"Hidden states after transpose: {hidden_states.shape}")
+        
+        # Ensure encoder hidden states are in [src_len, batch_size, embed_dim]
+        encoder_hidden_states = encoder_hidden_states.transpose(0, 1)  # [src_len, batch_size, embed_dim]
+        print(f"Encoder hidden states after transpose: {encoder_hidden_states.shape}")
         
         # Handle attention masks
         # Create causal mask for autoregressive decoding
@@ -308,19 +329,20 @@ class TransformerDecoder(nn.Module):
             ),
             diagonal=1
         )
-        causal_mask = causal_mask.unsqueeze(0).unsqueeze(0)  # [1, 1, seq_len, seq_len]
         
-        # Convert encoder attention mask if needed
+        print(f"Created causal mask shape: {causal_mask.shape}")
+        
+        # Handle encoder attention mask
         if encoder_attention_mask is not None:
-            encoder_attention_mask = encoder_attention_mask.unsqueeze(1).unsqueeze(2)  # [batch_size, 1, 1, enc_seq_len]
-            encoder_attention_mask = (1.0 - encoder_attention_mask) * -10000.0
+            # Convert to float mask and flip the values since PyTorch attention masks are inverted
+            encoder_attention_mask = (1.0 - encoder_attention_mask.float()) * torch.finfo(torch.float).min
         
         # Process through each decoder layer
         for i, layer in enumerate(self.layers):
             # Apply layerdrop during training
             if self.training and torch.rand(1).item() < self.layerdrop:
                 continue
-                
+            
             # Save hidden states if needed
             if output_hidden_states:
                 all_hidden_states += (hidden_states,)
@@ -347,13 +369,39 @@ class TransformerDecoder(nn.Module):
                 all_cross_attns += (layer_outputs[2],)
         
         # Apply final layer normalization
-        hidden_states = self.layer_norm(hidden_states)
+        hidden_states = self.layer_norm(hidden_states)  # [seq_len, batch_size, embed_dim]
         
         # Save final hidden states if needed
         if output_hidden_states:
             all_hidden_states += (hidden_states,)
         
         # Project to vocabulary space
-        logits = self.output_projection(hidden_states)
+        logits = self.output_projection(hidden_states)  # [seq_len, batch_size, vocab_size]
         
-        return (logits, all_hidden_states, all_self_attns, all_cross_attns) 
+        # Transpose back to [batch_size, seq_len, vocab_size]
+        logits = logits.transpose(0, 1)
+        
+        # Debug print shapes before reshaping
+        print(f"Logits shape before reshape: {logits.shape}")
+        
+        # Reshape to [batch_size * seq_len, vocab_size] for loss calculation
+        logits = logits.reshape(-1, logits.size(-1))
+        
+        # Debug print final shapes
+        print(f"Final logits shape: {logits.shape}")
+        
+        # Create output dictionary
+        outputs = {
+            "logits": logits,
+        }
+        
+        if output_hidden_states:
+            outputs["hidden_states"] = all_hidden_states
+            
+        if output_attentions:
+            outputs["attentions"] = {
+                "self_attentions": all_self_attns,
+                "cross_attentions": all_cross_attns
+            }
+        
+        return outputs 

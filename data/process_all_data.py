@@ -11,6 +11,10 @@ from tqdm import tqdm
 import requests
 from rdkit import Chem
 import gzip
+import json
+
+# Import our DailyMed processor
+from process_dailymed import process_dailymed_data
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -102,25 +106,25 @@ class DataProcessor:
         """Process DailyMed data files."""
         logger.info("Processing DailyMed data...")
         dailymed_dir = self.raw_data_dir / 'dailymed'
+        structures_file = self.raw_data_dir / 'sider' / 'structures.tsv'
+        output_file = self.output_dir / 'dailymed_processed.json'
         
-        try:
-            # Load processed DailyMed data if it exists
-            dailymed_file = dailymed_dir / 'dailymed_processed.csv'
-            if dailymed_file.exists():
-                df = pd.read_csv(dailymed_file)
-                
-                # Validate SMILES strings
-                df['valid_smiles'] = df['smiles'].apply(lambda x: Chem.MolFromSmiles(x) is not None)
-                df = df[df['valid_smiles']].drop('valid_smiles', axis=1)
-                
-                return df
-            
-            logger.warning("No processed DailyMed data found")
+        # Check if input file exists
+        input_file = dailymed_dir / 'adverse_reactions.csv'
+        if not input_file.exists():
+            logger.warning(f"DailyMed adverse reactions file not found: {input_file}")
+            logger.info("Please run 'python data/download_dailymed.py' first")
             return pd.DataFrame()
-            
-        except Exception as e:
-            logger.error(f"Error processing DailyMed data: {str(e)}")
-            return pd.DataFrame()
+        
+        # Process DailyMed data
+        processed_data = process_dailymed_data(
+            input_file=str(input_file),
+            structures_file=str(structures_file),
+            output_file=str(output_file)
+        )
+        
+        logger.info(f"Processed {len(processed_data)} DailyMed records")
+        return processed_data
     
     def process_faers_data(self):
         """Process FAERS data files."""
@@ -167,30 +171,28 @@ class DataProcessor:
         """Combine all processed datasets."""
         logger.info("Combining all datasets...")
         
-        # Process each dataset
+        # Process individual datasets
         sider_data = self.process_sider_data()
         dailymed_data = self.process_dailymed_data()
         faers_data = self.process_faers_data()
         
-        # Combine datasets
+        # Combine all datasets
         all_data = pd.concat([sider_data, dailymed_data, faers_data], ignore_index=True)
         
-        # Remove duplicates based on SMILES (keeping the longest ADR text)
-        all_data['adr_length'] = all_data['adr_text'].str.len()
-        all_data = all_data.sort_values('adr_length', ascending=False)
-        all_data = all_data.drop_duplicates(subset='smiles', keep='first')
-        all_data = all_data.drop('adr_length', axis=1)
+        # Drop duplicates based on drug_name and adr_text
+        all_data = all_data.drop_duplicates(subset=['drug_name', 'adr_text'])
+        
+        # Remove rows with missing SMILES or ADR text
+        all_data = all_data.dropna(subset=['smiles', 'adr_text'])
+        all_data = all_data[all_data['smiles'] != '']
+        all_data = all_data[all_data['adr_text'] != '']
         
         # Save combined dataset
-        output_file = self.output_dir / 'combined_dataset.csv'
-        all_data.to_csv(output_file, index=False)
-        logger.info(f"Saved combined dataset to {output_file}")
+        output_file = self.output_dir / 'all_data.json'
+        all_data.to_json(output_file, orient='records', lines=True)
         
-        # Print statistics
-        logger.info("\nDataset Statistics:")
-        logger.info(f"Total number of samples: {len(all_data)}")
-        logger.info(f"Number of unique drugs: {len(all_data['drug_name'].unique())}")
-        logger.info(f"Average ADR text length: {all_data['adr_text'].str.len().mean():.1f} characters")
+        logger.info(f"Combined dataset has {len(all_data)} records")
+        logger.info(f"Saved combined dataset to {output_file}")
         
         return all_data
 
