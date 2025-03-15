@@ -25,16 +25,16 @@ class ModelConfig:
     num_encoder_layers: int = 6
     encoder_attention_heads: int = 12
     encoder_ffn_dim: int = 3072
-    encoder_layerdrop: float = 0.1
+    encoder_layerdrop: float = 0.0  # Reduced from 0.1 to improve information flow
     
     # Decoder configurations
     num_decoder_layers: int = 6
     decoder_attention_heads: int = 12
     decoder_ffn_dim: int = 3072
-    decoder_layerdrop: float = 0.1
+    decoder_layerdrop: float = 0.0  # Reduced from 0.1 to improve information flow
     
     # General transformer settings
-    dropout: float = 0.1
+    dropout: float = 0.2  # Increased to prevent overfitting
     attention_dropout: float = 0.1
     activation_dropout: float = 0.1
     activation_function: str = "gelu"
@@ -46,7 +46,7 @@ class ModelConfig:
     
     # DMA settings
     use_dma: bool = True  # Diagonal Masked Attention
-    dma_probability: float = 0.25  # Probability of masking in DMA
+    dma_probability: float = 0.15  # Reduced from 0.25 to make learning easier initially
 
 
 @dataclass
@@ -55,35 +55,35 @@ class TrainingConfig:
     overwrite_output_dir: bool = True
     
     # Training hyperparameters
-    learning_rate: float = 3e-5
-    weight_decay: float = 0.01
+    learning_rate: float = 5e-5  # Increased from 3e-5 for better initial learning
+    weight_decay: float = 0.005  # Reduced from 0.01 to allow more flexibility in learning
     adam_beta1: float = 0.9
     adam_beta2: float = 0.999
     adam_epsilon: float = 1e-8
     max_grad_norm: float = 1.0
     
     # Training settings
-    num_train_epochs: int = 10  # Restored original value
+    num_train_epochs: int = 20  # Increased from 10 to allow more time to learn
     max_steps: int = -1  # Overrides num_train_epochs if > 0
-    per_device_train_batch_size: int = 32  # Restored original value
-    per_device_eval_batch_size: int = 32  # Restored original value
-    gradient_accumulation_steps: int = 1
+    per_device_train_batch_size: int = 2  # Kept at 2 for memory constraints
+    per_device_eval_batch_size: int = 2
+    gradient_accumulation_steps: int = 16
     
     # Learning rate schedule
-    lr_scheduler_type: str = "linear"
-    warmup_ratio: float = 0.1
+    lr_scheduler_type: str = "cosine"  # Changed from linear to cosine for better convergence
+    warmup_ratio: float = 0.2  # Increased from 0.1 for more gradual warmup
     
     # Evaluation and logging
     evaluation_strategy: str = "epoch"
     logging_dir: str = "./logs"
-    logging_steps: int = 100  # Restored original value
-    save_steps: int = 1000  # Restored original value
-    eval_steps: int = 1000  # Restored original value
+    logging_steps: int = 100
+    save_steps: int = 1000
+    eval_steps: int = 1000
     save_total_limit: int = 3
     
     # Early stopping
-    early_stopping_patience: int = 3  # Restored original value
-    early_stopping_threshold: float = 0.01
+    early_stopping_patience: int = 5  # Increased from 3 to give more room for improvement
+    early_stopping_threshold: float = 0.005  # Reduced from 0.01 to be more sensitive to small improvements
     
     # Mixed precision
     fp16: bool = True
@@ -100,7 +100,7 @@ class DataConfig:
     # Data processing
     max_adr_length: int = 256
     max_smiles_length: int = 256
-    mask_probability: float = 0.25  # Probability of masking tokens in ADR text
+    mask_probability: float = 0.15  # Reduced from 0.25 to make the task easier initially
     
     # Data loading
     shuffle: bool = True

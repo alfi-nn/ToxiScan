@@ -34,7 +34,10 @@ class Trainer:
         checkpoint_dir: str = "./checkpoints",
         use_wandb: bool = False,
         wandb_project: str = "bio-chemtransformer",
-        wandb_name: Optional[str] = None
+        wandb_name: Optional[str] = None,
+        gradient_accumulation_steps: int = 1,
+        scaler: Optional[Any] = None,
+        use_amp: bool = False
     ):
         """
         Initialize the trainer.
@@ -51,6 +54,9 @@ class Trainer:
             use_wandb: Whether to use Weights & Biases for logging
             wandb_project: Weights & Biases project name
             wandb_name: Weights & Biases run name
+            gradient_accumulation_steps: Number of steps to accumulate gradients before updating weights
+            scaler: Gradient scaler for mixed precision training
+            use_amp: Whether to use automatic mixed precision
         """
         self.model = model
         self.train_loader = train_loader
@@ -63,6 +69,9 @@ class Trainer:
         self.use_wandb = use_wandb
         self.wandb_project = wandb_project
         self.wandb_name = wandb_name
+        self.gradient_accumulation_steps = gradient_accumulation_steps
+        self.scaler = scaler
+        self.use_amp = use_amp
         
         # Create checkpoint directory
         os.makedirs(checkpoint_dir, exist_ok=True)
@@ -98,60 +107,144 @@ class Trainer:
         
         progress_bar = tqdm(self.train_loader, desc="Training")
         
-        for batch in progress_bar:
-            # Move batch to device
-            adr_input_ids = batch["adr_input_ids"].to(self.device)
-            adr_attention_mask = batch["adr_attention_mask"].to(self.device)
-            smiles_input_ids = batch["smiles_input_ids"].to(self.device)
-            smiles_attention_mask = batch["smiles_attention_mask"].to(self.device)
-            labels = batch["labels"].to(self.device)
+        # For monitoring gradients
+        gradient_norms = []
+        
+        for batch_idx, batch in enumerate(progress_bar):
+            try:
+                # Move batch to device
+                adr_input_ids = batch["adr_input_ids"].to(self.device)
+                adr_attention_mask = batch["adr_attention_mask"].to(self.device)
+                smiles_input_ids = batch["smiles_input_ids"].to(self.device)
+                smiles_attention_mask = batch["smiles_attention_mask"].to(self.device)
+                labels = batch["labels"].to(self.device)
+                
+                # Forward pass with mixed precision if enabled
+                if self.use_amp and self.scaler is not None:
+                    from torch.cuda.amp import autocast
+                    with autocast():
+                        outputs = self.model(
+                            adr_input_ids=adr_input_ids,
+                            adr_attention_mask=adr_attention_mask,
+                            smiles_input_ids=smiles_input_ids,
+                            smiles_attention_mask=smiles_attention_mask
+                        )
+                        
+                        # Calculate loss
+                        logits = outputs["logits"]
+                        loss_fct = nn.CrossEntropyLoss(ignore_index=-100)
+                        
+                        # Ensure labels have the correct shape
+                        labels = labels.squeeze(0) if labels.dim() == 3 else labels
+                        labels = labels.view(-1)  # Flatten to [batch_size * seq_length]
+                        
+                        loss = loss_fct(logits, labels)
+                        
+                        # Scale loss for gradient accumulation if needed
+                        if self.gradient_accumulation_steps > 1:
+                            loss = loss / self.gradient_accumulation_steps
+                else:
+                    # Regular forward pass without mixed precision
+                    outputs = self.model(
+                        adr_input_ids=adr_input_ids,
+                        adr_attention_mask=adr_attention_mask,
+                        smiles_input_ids=smiles_input_ids,
+                        smiles_attention_mask=smiles_attention_mask
+                    )
+                    
+                    # Calculate loss
+                    logits = outputs["logits"]
+                    loss_fct = nn.CrossEntropyLoss(ignore_index=-100)
+                    
+                    # Ensure labels have the correct shape
+                    labels = labels.squeeze(0) if labels.dim() == 3 else labels
+                    labels = labels.view(-1)  # Flatten to [batch_size * seq_length]
+                    
+                    loss = loss_fct(logits, labels)
+                    
+                    # Scale loss for gradient accumulation if needed
+                    if self.gradient_accumulation_steps > 1:
+                        loss = loss / self.gradient_accumulation_steps
+                
+                # Backward pass with mixed precision if enabled
+                if self.use_amp and self.scaler is not None:
+                    self.scaler.scale(loss).backward()
+                else:
+                    loss.backward()
+                
+                # Track gradient norms for monitoring training health
+                if batch_idx % 10 == 0:  # Check every 10 batches
+                    total_norm = 0.0
+                    for p in self.model.parameters():
+                        if p.grad is not None:
+                            param_norm = p.grad.data.norm(2)
+                            total_norm += param_norm.item() ** 2
+                    total_norm = total_norm ** 0.5
+                    gradient_norms.append(total_norm)
+                
+                # Gradient accumulation - only update every n steps
+                if (batch_idx + 1) % self.gradient_accumulation_steps == 0 or batch_idx == len(self.train_loader) - 1:
+                    # Gradient clipping
+                    if self.max_grad_norm > 0:
+                        if self.use_amp and self.scaler is not None:
+                            # Use scaler for gradient clipping
+                            self.scaler.unscale_(self.optimizer)
+                            clip_grad_norm_(self.model.parameters(), self.max_grad_norm)
+                        else:
+                            clip_grad_norm_(self.model.parameters(), self.max_grad_norm)
+                    
+                    # Update weights
+                    if self.use_amp and self.scaler is not None:
+                        self.scaler.step(self.optimizer)
+                        self.scaler.update()
+                    else:
+                        self.optimizer.step()
+                    
+                    # Update learning rate
+                    if self.scheduler is not None:
+                        self.scheduler.step()
+                    
+                    # Zero the gradients
+                    self.optimizer.zero_grad()
+                
+                # Update progress bar
+                current_loss = loss.item() * (self.gradient_accumulation_steps if self.gradient_accumulation_steps > 1 else 1)
+                total_loss += current_loss
+                progress_bar.set_postfix({
+                    "loss": current_loss,
+                    "avg_loss": total_loss / (batch_idx + 1)
+                })
+                
+                # Log to Weights & Biases
+                if self.use_wandb:
+                    wandb.log({
+                        "train_batch_loss": current_loss,
+                        "learning_rate": self.scheduler.get_last_lr()[0] if self.scheduler else self.optimizer.param_groups[0]['lr']
+                    })
+                    
+                    # Log gradient norms periodically
+                    if batch_idx % 10 == 0 and gradient_norms:
+                        wandb.log({"gradient_norm": gradient_norms[-1]})
             
-            # Forward pass
-            outputs = self.model(
-                adr_input_ids=adr_input_ids,
-                adr_attention_mask=adr_attention_mask,
-                smiles_input_ids=smiles_input_ids,
-                smiles_attention_mask=smiles_attention_mask
-            )
-            
-            # Calculate loss
-            logits = outputs["logits"]
-            loss_fct = nn.CrossEntropyLoss(ignore_index=-100)
-            
-            # Ensure labels have the correct shape
-            labels = labels.squeeze(0) if labels.dim() == 3 else labels
-            labels = labels.view(-1)  # Flatten to [batch_size * seq_length]
-            
-            loss = loss_fct(logits, labels)
-            
-            # Backward pass
-            self.optimizer.zero_grad()
-            loss.backward()
-            
-            # Gradient clipping
-            clip_grad_norm_(self.model.parameters(), self.max_grad_norm)
-            
-            # Update weights
-            self.optimizer.step()
-            
-            # Update learning rate
-            if self.scheduler is not None:
-                self.scheduler.step()
-            
-            # Update progress bar
-            total_loss += loss.item()
-            progress_bar.set_postfix({"loss": loss.item()})
-            
-            # Log to Weights & Biases
-            if self.use_wandb:
-                wandb.log({"train_batch_loss": loss.item()})
+            except Exception as e:
+                logger.error(f"Error in batch {batch_idx}: {str(e)}")
+                import traceback
+                logger.error(traceback.format_exc())
+                continue  # Skip problematic batch and continue training
         
         # Calculate average loss
         avg_loss = total_loss / num_batches
         
+        # Log average gradient norm
+        avg_gradient_norm = sum(gradient_norms) / len(gradient_norms) if gradient_norms else 0
+        logger.info(f"Average gradient norm for epoch: {avg_gradient_norm:.4f}")
+        
         # Log to Weights & Biases
         if self.use_wandb:
-            wandb.log({"train_epoch_loss": avg_loss})
+            wandb.log({
+                "train_epoch_loss": avg_loss,
+                "epoch_gradient_norm": avg_gradient_norm
+            })
         
         return avg_loss
     
@@ -171,45 +264,52 @@ class Trainer:
         
         with torch.no_grad():
             for batch in tqdm(self.val_loader, desc="Evaluating"):
-                # Move batch to device
-                adr_input_ids = batch["adr_input_ids"].to(self.device)
-                adr_attention_mask = batch["adr_attention_mask"].to(self.device)
-                smiles_input_ids = batch["smiles_input_ids"].to(self.device)
-                smiles_attention_mask = batch["smiles_attention_mask"].to(self.device)
-                labels = batch["labels"].to(self.device)
+                try:
+                    # Move batch to device
+                    adr_input_ids = batch["adr_input_ids"].to(self.device)
+                    adr_attention_mask = batch["adr_attention_mask"].to(self.device)
+                    smiles_input_ids = batch["smiles_input_ids"].to(self.device)
+                    smiles_attention_mask = batch["smiles_attention_mask"].to(self.device)
+                    labels = batch["labels"].to(self.device)
+                    
+                    # Forward pass
+                    outputs = self.model(
+                        adr_input_ids=adr_input_ids,
+                        adr_attention_mask=adr_attention_mask,
+                        smiles_input_ids=smiles_input_ids,
+                        smiles_attention_mask=smiles_attention_mask
+                    )
+                    
+                    # Calculate loss
+                    logits = outputs["logits"]
+                    loss_fct = nn.CrossEntropyLoss(ignore_index=-100)
+                    
+                    # Ensure labels have the correct shape
+                    labels = labels.squeeze(0) if labels.dim() == 3 else labels
+                    labels = labels.view(-1)  # Flatten to [batch_size * seq_length]
+                    
+                    loss = loss_fct(logits, labels)
+                    
+                    # Update total loss
+                    total_loss += loss.item()
+                    
+                    # Get predictions
+                    preds = torch.argmax(logits, dim=-1)
+                    
+                    # Only consider non-ignored tokens (-100)
+                    valid_mask = labels != -100
+                    if valid_mask.sum() > 0:
+                        all_preds.extend(preds[valid_mask].cpu().numpy())
+                        all_labels.extend(labels[valid_mask].cpu().numpy())
                 
-                # Forward pass
-                outputs = self.model(
-                    adr_input_ids=adr_input_ids,
-                    adr_attention_mask=adr_attention_mask,
-                    smiles_input_ids=smiles_input_ids,
-                    smiles_attention_mask=smiles_attention_mask
-                )
-                
-                # Calculate loss
-                logits = outputs["logits"]
-                loss_fct = nn.CrossEntropyLoss(ignore_index=-100)
-                
-                # Ensure labels have the correct shape
-                labels = labels.squeeze(0) if labels.dim() == 3 else labels
-                labels = labels.view(-1)  # Flatten to [batch_size * seq_length]
-                
-                loss = loss_fct(logits, labels)
-                
-                # Update total loss
-                total_loss += loss.item()
-                
-                # Get predictions
-                preds = torch.argmax(logits, dim=-1)
-                
-                # Only consider non-ignored tokens (-100)
-                valid_mask = labels != -100
-                if valid_mask.sum() > 0:
-                    all_preds.extend(preds[valid_mask].cpu().numpy())
-                    all_labels.extend(labels[valid_mask].cpu().numpy())
+                except Exception as e:
+                    logger.error(f"Error during evaluation: {str(e)}")
+                    import traceback
+                    logger.error(traceback.format_exc())
+                    continue  # Skip problematic batch and continue evaluation
         
         # Calculate average loss
-        avg_loss = total_loss / num_batches
+        avg_loss = total_loss / num_batches if num_batches > 0 else float('inf')
         
         # Calculate additional metrics
         metrics = {
@@ -220,6 +320,9 @@ class Trainer:
         if all_preds and all_labels:
             accuracy = (np.array(all_preds) == np.array(all_labels)).mean()
             metrics["accuracy"] = accuracy
+            
+            # Additional metrics - per class accuracy if needed
+            # (add more metrics here if needed)
         
         # Log to Weights & Biases
         if self.use_wandb:
@@ -313,6 +416,10 @@ class Trainer:
         
         if self.scheduler is not None:
             checkpoint["scheduler_state_dict"] = self.scheduler.state_dict()
+            
+        # Save mixed precision training state if used
+        if self.use_amp and self.scaler is not None:
+            checkpoint["scaler_state_dict"] = self.scaler.state_dict()
         
         torch.save(checkpoint, checkpoint_path)
         logger.info(f"Saved checkpoint to {checkpoint_path}")
@@ -337,6 +444,10 @@ class Trainer:
         
         if self.scheduler is not None and "scheduler_state_dict" in checkpoint:
             self.scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
+            
+        # Load mixed precision training state if available
+        if self.use_amp and self.scaler is not None and "scaler_state_dict" in checkpoint:
+            self.scaler.load_state_dict(checkpoint["scaler_state_dict"])
         
         logger.info(f"Loaded checkpoint from {checkpoint_path}")
     

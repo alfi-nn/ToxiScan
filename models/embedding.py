@@ -22,7 +22,8 @@ class BioChemEmbedding(nn.Module):
         projection_dim: int = 768,
         embedding_combination: str = "concat",
         max_adr_length: int = 256,
-        max_smiles_length: int = 256
+        max_smiles_length: int = 256,
+        freeze_pretrained: bool = True
     ):
         """
         Initialize the embedding layer.
@@ -36,6 +37,7 @@ class BioChemEmbedding(nn.Module):
             embedding_combination: Method to combine embeddings ("concat" or "sum")
             max_adr_length: Maximum length for ADR text tokens
             max_smiles_length: Maximum length for SMILES tokens
+            freeze_pretrained: Whether to freeze the pretrained models
         """
         super().__init__()
         
@@ -49,6 +51,16 @@ class BioChemEmbedding(nn.Module):
         # Load pre-trained models
         self.bio_clinical_bert = AutoModel.from_pretrained(bio_clinical_bert_model)
         self.chembert = AutoModel.from_pretrained(chembert_model)
+        
+        # Freeze pretrained models if requested
+        if freeze_pretrained:
+            for param in self.bio_clinical_bert.parameters():
+                param.requires_grad = False
+            
+            for param in self.chembert.parameters():
+                param.requires_grad = False
+            
+            print("Pretrained models have been frozen")
         
         # Load tokenizers
         self.bio_clinical_tokenizer = AutoTokenizer.from_pretrained(bio_clinical_bert_model)

@@ -118,6 +118,54 @@ python train.py
 python train.py --train_file data/processed/train.json --val_file data/processed/val.json --test_file data/processed/test.json --device cuda --use_wandb
 ```
 
+### Training with the Full Dataset
+
+For training with the full dataset, we've provided a convenience script:
+
+```bash
+# Train with the full dataset
+./train_full.sh
+```
+
+### Memory-Efficient Training
+
+The model is configured to use a small batch size (2) with gradient accumulation (16 steps) to enable training on GPUs with limited VRAM while maintaining the statistical benefits of larger batch sizes.
+
+To further adjust memory usage, you can modify:
+- `per_device_train_batch_size` in `config.py` (smaller values use less memory)
+- `gradient_accumulation_steps` in `config.py` (larger values compensate for smaller batch sizes)
+
+### Checkpoint System
+
+The training automatically saves checkpoints to the `./checkpoints` directory:
+
+- **Best Model**: Saved whenever validation loss improves (`best_model.pt`)
+- **Periodic Checkpoints**: Saved at regular intervals (`epoch_X.pt`)
+
+Checkpoints include:
+- Model weights
+- Optimizer state
+- Learning rate scheduler state
+
+### Resuming Training from Checkpoints
+
+You can resume training from a saved checkpoint:
+
+```bash
+# Resume from the best model
+python train.py --resume_from_checkpoint checkpoints/best_model.pt --device cuda
+
+# Resume from a specific epoch
+python train.py --resume_from_checkpoint checkpoints/epoch_5.pt --device cuda
+```
+
+This is useful when:
+- Training was interrupted and needs to be continued
+- You want to train for additional epochs after initial training
+- Fine-tuning an existing model with different hyperparameters
+
+The checkpoint path can be absolute, relative, or just the filename (in which case it looks in the checkpoint directory).
+
 ## Evaluation
 
 Evaluate the trained model on a test dataset:
@@ -133,6 +181,52 @@ Use the trained model for inference:
 ```bash
 python inference.py --model_path checkpoints/best_model.pt --drug_name "Aspirin" --smiles "CC(=O)OC1=CC=CC=C1C(=O)O"
 ```
+
+## Testing with Custom Input Data
+
+The `test.py` script provides an easy way to test the trained model with your own input data:
+
+### Single Input Testing
+
+Test the model with a single ADR text and SMILES string:
+
+```bash
+python test.py --checkpoint checkpoints/best_model.pt --mode single \
+  --adr_text "The patient experienced headache" \
+  --smiles "CC(=O)Nc1ccc(O)cc1"
+```
+
+### Batch Testing
+
+Test the model with multiple inputs from a file:
+
+```bash
+python test.py --checkpoint checkpoints/best_model.pt --mode batch \
+  --data_file example_test_data.jsonl \
+  --output_file results.json
+```
+
+### Input Data Format
+
+For batch testing, prepare your data in JSONL format (one JSON object per line):
+
+```json
+{"drug_name": "Acetaminophen", "smiles": "CC(=O)Nc1ccc(O)cc1", "adr_text": "The patient experienced headache and nausea after taking medication.", "source": "example"}
+{"drug_name": "Ibuprofen", "smiles": "CC(C)Cc1ccc(C(C)C(=O)O)cc1", "adr_text": "The patient reported stomach pain and dizziness.", "source": "example"}
+```
+
+Each object should contain:
+- `drug_name`: Name of the drug (optional)
+- `smiles`: SMILES notation for the drug's chemical structure
+- `adr_text`: The ADR (Adverse Drug Reaction) text
+- `source`: Source of the data (optional)
+
+### Additional Options
+
+The testing script supports several options:
+- `--batch_size`: Number of samples to process at once (default: 8)
+- `--device`: Device to run inference on (default: cuda if available, otherwise cpu)
+- `--num_return_sequences`: Number of different outputs to generate for each input (in single mode)
 
 ## Model Architecture Details
 

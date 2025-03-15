@@ -5,6 +5,7 @@ Tokenization utilities for the Bio-ChemTransformer model.
 import torch
 from transformers import AutoTokenizer
 from typing import Dict, List, Tuple, Union, Optional
+import re
 
 
 class BioChemTokenizer:
@@ -183,23 +184,66 @@ class BioChemTokenizer:
         # Update input_ids in the encodings
         encodings.input_ids = input_ids
     
-    def decode_adr(self, token_ids: torch.Tensor) -> List[str]:
+    def decode_adr(self, token_ids: torch.Tensor, skip_special_tokens: bool = True, clean_up_tokenization_spaces: bool = True) -> str:
         """
-        Decode ADR token IDs back to text.
+        Decode ADR token IDs back to text with improved cleaning.
         
         Args:
             token_ids: Tensor of token IDs
+            skip_special_tokens: Whether to skip special tokens in the decoded output
+            clean_up_tokenization_spaces: Whether to clean up tokenization artifacts
             
         Returns:
-            List of decoded strings
+            Decoded and cleaned string
         """
         if token_ids.dim() == 1:
             token_ids = token_ids.unsqueeze(0)
+        
+        # Convert to list for handling
+        if isinstance(token_ids, torch.Tensor):
+            token_ids = token_ids.cpu().tolist()
+        
+        decoded_texts = []
+        for ids in token_ids:
+            # Filter out padding tokens and repeated EOS tokens
+            if self.text_tokenizer.pad_token_id in ids:
+                ids = ids[:ids.index(self.text_tokenizer.pad_token_id)]
             
-        return [
-            self.text_tokenizer.decode(ids, skip_special_tokens=True)
-            for ids in token_ids
-        ]
+            # Decode with the text tokenizer
+            text = self.text_tokenizer.decode(
+                ids, 
+                skip_special_tokens=skip_special_tokens,
+                clean_up_tokenization_spaces=clean_up_tokenization_spaces
+            )
+            
+            # Additional text cleaning
+            text = text.strip()
+            
+            # Fix common issues like repeated punctuation
+            text = re.sub(r'\.{2,}', '.', text)  # Replace multiple periods with single
+            text = re.sub(r'\s+', ' ', text)     # Replace multiple spaces with single
+            text = re.sub(r'([.,;!?])\s*([.,;!?])', r'\1', text)  # Remove repeated punctuation
+            
+            # Fix word fragments with periods
+            text = re.sub(r'(\w+)\.(\w+)', r'\1 \2', text)
+            
+            # Capitalize first letter of sentences
+            sentences = re.split(r'([.!?])\s+', text)
+            for i in range(0, len(sentences), 2):
+                if i < len(sentences):
+                    sentences[i] = sentences[i].capitalize()
+            text = ''.join(sentences)
+            
+            # Ensure first character is capitalized
+            if text and len(text) > 0:
+                text = text[0].upper() + text[1:]
+            
+            decoded_texts.append(text)
+        
+        # If single item was passed, return string instead of list
+        if len(decoded_texts) == 1:
+            return decoded_texts[0]
+        return decoded_texts
     
     def decode_smiles(self, token_ids: torch.Tensor) -> List[str]:
         """
