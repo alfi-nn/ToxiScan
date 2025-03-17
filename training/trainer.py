@@ -135,8 +135,18 @@ class Trainer:
                         loss_fct = nn.CrossEntropyLoss(ignore_index=-100)
                         
                         # Ensure labels have the correct shape
-                        labels = labels.squeeze(0) if labels.dim() == 3 else labels
-                        labels = labels.view(-1)  # Flatten to [batch_size * seq_length]
+                        if labels.dim() == 3:
+                            labels = labels.squeeze(0)
+                        
+                        # Handle logits shape
+                        if len(logits.shape) == 2:
+                            # If logits is 2D [batch_size * seq_length, vocab_size]
+                            labels = labels.view(-1)  # [batch_size * seq_length]
+                        else:
+                            # If logits is 3D [batch_size, seq_length, vocab_size]
+                            batch_size, seq_length, vocab_size = logits.shape
+                            logits = logits.view(-1, vocab_size)  # [batch_size * seq_length, vocab_size]
+                            labels = labels.view(-1)  # [batch_size * seq_length]
                         
                         loss = loss_fct(logits, labels)
                         
@@ -157,8 +167,18 @@ class Trainer:
                     loss_fct = nn.CrossEntropyLoss(ignore_index=-100)
                     
                     # Ensure labels have the correct shape
-                    labels = labels.squeeze(0) if labels.dim() == 3 else labels
-                    labels = labels.view(-1)  # Flatten to [batch_size * seq_length]
+                    if labels.dim() == 3:
+                        labels = labels.squeeze(0)
+                    
+                    # Handle logits shape
+                    if len(logits.shape) == 2:
+                        # If logits is 2D [batch_size * seq_length, vocab_size]
+                        labels = labels.view(-1)  # [batch_size * seq_length]
+                    else:
+                        # If logits is 3D [batch_size, seq_length, vocab_size]
+                        batch_size, seq_length, vocab_size = logits.shape
+                        logits = logits.view(-1, vocab_size)  # [batch_size * seq_length, vocab_size]
+                        labels = labels.view(-1)  # [batch_size * seq_length]
                     
                     loss = loss_fct(logits, labels)
                     
@@ -285,8 +305,18 @@ class Trainer:
                     loss_fct = nn.CrossEntropyLoss(ignore_index=-100)
                     
                     # Ensure labels have the correct shape
-                    labels = labels.squeeze(0) if labels.dim() == 3 else labels
-                    labels = labels.view(-1)  # Flatten to [batch_size * seq_length]
+                    if labels.dim() == 3:
+                        labels = labels.squeeze(0)
+                    
+                    # Handle logits shape
+                    if len(logits.shape) == 2:
+                        # If logits is 2D [batch_size * seq_length, vocab_size]
+                        labels = labels.view(-1)  # [batch_size * seq_length]
+                    else:
+                        # If logits is 3D [batch_size, seq_length, vocab_size]
+                        batch_size, seq_length, vocab_size = logits.shape
+                        logits = logits.view(-1, vocab_size)  # [batch_size * seq_length, vocab_size]
+                        labels = labels.view(-1)  # [batch_size * seq_length]
                     
                     loss = loss_fct(logits, labels)
                     
